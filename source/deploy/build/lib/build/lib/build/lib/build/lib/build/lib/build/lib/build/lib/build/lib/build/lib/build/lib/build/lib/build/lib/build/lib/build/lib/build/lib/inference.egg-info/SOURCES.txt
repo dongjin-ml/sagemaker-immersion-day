@@ -1,0 +1,17 @@
+MANIFEST.in
+inference.py
+setup.cfg
+setup.py
+./MANIFEST.in
+./inference.py
+./setup.cfg
+./setup.py
+./build/lib/inference.py
+./inference.egg-info/PKG-INFO
+./inference.egg-info/SOURCES.txt
+./inference.egg-info/dependency_links.txt
+./inference.egg-info/top_level.txt
+inference.egg-info/PKG-INFO
+inference.egg-info/SOURCES.txt
+inference.egg-info/dependency_links.txt
+inference.egg-info/top_level.txt
