@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import argparse
 import sagemaker
 import subprocess
@@ -16,6 +17,13 @@ class deploy():
          
         self.args = args
         print (self.args)
+        
+        ## copy requirement.txt
+        src = os.path.join(self.args.prefix_deploy, "requirements", "requirements.txt")
+        dest = os.path.join(self.args.prefix_deploy, "inference")
+        shutil.copy2(src, dest)
+        
+        print (os.listdir(dest))
         
     def _create_endpoint(self,):
         
