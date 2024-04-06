@@ -30,6 +30,11 @@
 * 2.evaluation.ipynb (  Local Mode)
 * 4-2.pipeline-local-mode.ipynb
     
+## 2.4 BYOM(Bring Your Own Model) 추천 실행 노트북  
+* 7.advanced_byom_xgboost_regression_sagemaker_deploy.ipynb
+  * Bring Your Own Model 기반 SageMaker Endpoint배포 실습
+  * 이 프로젝트에서는 일반적인 ML 학습 방식인 Scikit-learn과 XGBoost를 사용하여 로컬에서 학습한 모델을 이용하여, SageMaker의 Endpoint API 추론 기능을 활용하여 모델을 배포합니다. 
+
     
     
 # A. 참고 정보
