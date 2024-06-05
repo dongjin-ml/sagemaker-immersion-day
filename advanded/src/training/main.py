@@ -7,29 +7,11 @@ import numpy as np
 import torch.nn as nn
 from dataset import CustomDataset
 from autoencoder import AutoEncoder, get_model
-
-import torch.distributed as dist
+#import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from sagemaker_training import environment
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-# Import SMDataParallel PyTorch Modules, if applicable
-backend = 'nccl'
-training_env = environment.Environment()
-smdataparallel_enabled = training_env.additional_framework_parameters.get('sagemaker_distributed_dataparallel_enabled', False)
-if smdataparallel_enabled:
-    try:
-        import smdistributed.dataparallel.torch.torch_smddp
-        backend = 'smddp'
-        print('Using smddp as backend')
-    except ImportError: 
-        print('smdistributed module not available, falling back to NCCL collectives.')
-
-
-class CUDANotFoundException(Exception):
-    pass
 
 class Trainer():
     
@@ -165,27 +147,14 @@ def get_and_define_dataset(args):
     return train_ds, test_ds
 
 def get_dataloader(args, train_ds, test_ds):
-
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        train_ds,
-        num_replicas=args.world_size,
-        rank=rank
-    )
     
-    test_sampler = torch.utils.data.distributed.DistributedSampler(
-        test_ds,
-        num_replicas=args.world_size,
-        rank=rank
-    )
-
     train_loader = torch.utils.data.DataLoader(
         dataset = train_ds,
         batch_size = args.batch_size,
-        shuffle = False,
+        shuffle = True,
         pin_memory=True,
         num_workers=args.workers,
-        prefetch_factor=3,
-        sampler=train_sampler
+        prefetch_factor=3
     )
 
     val_loader = torch.utils.data.DataLoader(
@@ -194,8 +163,7 @@ def get_dataloader(args, train_ds, test_ds):
         shuffle = False,
         pin_memory=True,
         num_workers=args.workers,
-        prefetch_factor=3,
-        sampler=test_sampler
+        prefetch_factor=3
     )
     
     return train_loader, val_loader
@@ -220,18 +188,15 @@ def train(args):
     train_loader, val_loader = get_dataloader(args, train_ds, test_ds)
     
     logger.info("Set components..")
-    
-    device = torch.device(f"cuda:{args.local_rank}")
-    #model = Net().to(device)
 
-    model = get_model(
-        input_dim=args.num_features*args.shingle_size + args.emb_size,
-        hidden_sizes=[64, 48],
-        btl_size=32,
-        emb_size=args.emb_size
+    model = nn.DataParallel(
+        get_model(
+            input_dim=args.num_features*args.shingle_size + args.emb_size,
+            hidden_sizes=[64, 48],
+            btl_size=32,
+            emb_size=args.emb_size
+        )
     ).to(device)
-    
-    model = DDP(model, device_ids=[local_rank])
     
     # model = DDP(
     #     get_model(
@@ -292,11 +257,6 @@ if __name__ == "__main__":
     parser.add_argument("--shingle_size", type=int, default=os.environ["SM_HP_SHINGLE_SIZE"])
     parser.add_argument("--num_features", type=int, default=os.environ["SM_HP_NUM_FEATURES"])
     parser.add_argument("--emb_size", type=int, default=os.environ["SM_HP_EMB_SIZE"])
+        
     
-    dist.init_process_group(backend=backend)
-    args = parser.parse_args()
-    args.world_size = dist.get_world_size()
-    args.rank = rank = dist.get_rank()
-    args.local_rank = local_rank = int(os.getenv("LOCAL_RANK", -1))
-
-    train(args)
+    train(parser.parse_args())
