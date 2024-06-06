@@ -8,12 +8,20 @@ import torch.nn as nn
 from dataset import CustomDataset
 from autoencoder import AutoEncoder, get_model
 
+#################SMDDP#START#################################
+
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from sagemaker_training import environment
 
+#################SMDDP#END###################################
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+#################SMDDP#START#################################
 
 # Import SMDataParallel PyTorch Modules, if applicable
 backend = 'nccl'
@@ -27,9 +35,10 @@ if smdataparallel_enabled:
     except ImportError: 
         print('smdistributed module not available, falling back to NCCL collectives.')
 
-
 class CUDANotFoundException(Exception):
     pass
+
+#################SMDDP#END###################################
 
 class Trainer():
     
@@ -59,13 +68,13 @@ class Trainer():
             train_loss = []
             for time, x, y in self.train_loader:
                 time, x = time.to(self.device), x.to(self.device)
-                
+
                 self.optimizer.zero_grad()
 
                 _x = self.model(time, x)
                 t_emb, _x = self.model(time, x)
                 x = torch.cat([t_emb, x], dim=1)
-                
+
                 loss = self.criterion(x, _x)
                 loss.backward()
                 self.optimizer.step()
@@ -75,7 +84,11 @@ class Trainer():
             if epoch % 10 == 0 :
                 score = self.validation(self.model, 0.95)
                 diff = self.cos(x, _x).cpu().tolist()
-                print(f'Epoch : [{epoch}] Train loss : [{np.mean(train_loss)}], Train cos : [{np.mean(diff)}] Val cos : [{score}])')
+
+                logger.info(
+                    f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})'
+                )
+                print(f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})')
 
             if self.scheduler is not None:
                 self.scheduler.step(score)
@@ -165,7 +178,9 @@ def get_and_define_dataset(args):
     return train_ds, test_ds
 
 def get_dataloader(args, train_ds, test_ds):
-
+    
+    
+    #################SMDDP#START#################################
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_ds,
         num_replicas=args.world_size,
@@ -197,6 +212,8 @@ def get_dataloader(args, train_ds, test_ds):
         prefetch_factor=3,
         sampler=test_sampler
     )
+    
+    #################SMDDP#END###################################
     
     return train_loader, val_loader
 
@@ -231,17 +248,10 @@ def train(args):
         emb_size=args.emb_size
     ).to(device)
     
+    #################SMDDP#START#################################
     model = DDP(model, device_ids=[local_rank])
-    
-    # model = DDP(
-    #     get_model(
-    #         input_dim=args.num_features*args.shingle_size + args.emb_size,
-    #         hidden_sizes=[64, 48],
-    #         btl_size=32,
-    #         emb_size=args.emb_size
-    #     ).to(device)
-    # )
-                
+    #################SMDDP#END###################################
+
     optimizer = torch.optim.Adam(
         params=model.parameters(),
         lr=args.lr
@@ -293,12 +303,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_features", type=int, default=os.environ["SM_HP_NUM_FEATURES"])
     parser.add_argument("--emb_size", type=int, default=os.environ["SM_HP_EMB_SIZE"])
     
+    #################SMDDP#START#################################
     dist.init_process_group(backend=backend)
     args = parser.parse_args()
     args.world_size = dist.get_world_size()
     args.rank = rank = dist.get_rank()
     args.local_rank = local_rank = int(os.getenv("LOCAL_RANK", -1))
-    
+    #################SMDDP#END###################################
     print ("args.local_rank", args.local_rank)
 
     train(args)

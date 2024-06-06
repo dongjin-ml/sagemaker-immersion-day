@@ -8,8 +8,38 @@ import torch.nn as nn
 from dataset import CustomDataset
 from autoencoder import AutoEncoder, get_model
 
+
+#################EXP#START#################################
+import boto3
+from sagemaker.session import Session
+from sagemaker.experiments.run import Run, load_run
+
+boto_session = boto3.session.Session(region_name=os.environ["AWS_REGION"])
+sagemaker_session = Session(boto_session=boto_session)
+#################EXP#END###################################
+
+
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from sagemaker_training import environment
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+# Import SMDataParallel PyTorch Modules, if applicable
+backend = 'nccl'
+training_env = environment.Environment()
+smdataparallel_enabled = training_env.additional_framework_parameters.get('sagemaker_distributed_dataparallel_enabled', False)
+if smdataparallel_enabled:
+    try:
+        import smdistributed.dataparallel.torch.torch_smddp
+        backend = 'smddp'
+        print('Using smddp as backend')
+    except ImportError: 
+        print('smdistributed module not available, falling back to NCCL collectives.')
+
+class CUDANotFoundException(Exception):
+    pass
 
 class Trainer():
     
@@ -34,42 +64,73 @@ class Trainer():
         
         self.model.to(self.device)
         best_score = 0
-        for epoch in range(self.epoch):
-            self.model.train()
-            train_loss = []
-            for time, x, y in self.train_loader:
-                time, x = time.to(self.device), x.to(self.device)
+        
+        #################EXP#START#################################
+        with load_run(sagemaker_session=sagemaker_session) as run:
+            run.log_parameters(vars(args))
+            for epoch in range(self.epoch):
+                self.model.train()
+                train_loss = []
+                for time, x, y in self.train_loader:
+                    time, x = time.to(self.device), x.to(self.device)
+
+                    self.optimizer.zero_grad()
+
+                    _x = self.model(time, x)
+                    t_emb, _x = self.model(time, x)
+                    x = torch.cat([t_emb, x], dim=1)
+
+                    loss = self.criterion(x, _x)
+                    loss.backward()
+                    self.optimizer.step()
+
+                    train_loss.append(loss.item())
+
+                if epoch % 10 == 0 :
+                    score = self.validation(self.model, 0.95)
+                    diff = self.cos(x, _x).cpu().tolist()
+
+                    if args.local_rank == 0:
+                        # logger.info(
+                        #     "Processes {}/{} ({:.0f}%) of train data".format(
+                        #         len(self.train_loader.sampler),
+                        #         len(self.train_loader.dataset),
+                        #         100.0 * len(self.train_loader.sampler) / len(self.train_loader.dataset),
+                        #     )
+                        # )
+                        logger.info(
+                            f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})'
+                        )
+                        print(f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})')
+
+                        run.log_metric(
+                            name="train_loss",
+                            value=np.mean(train_loss),
+                            step=epoch
+                        )
+                        run.log_metric(
+                            name="train_cos",
+                            value=np.mean(diff),
+                            step=epoch
+                        )
+                        run.log_metric(
+                            name="val_cos",
+                            value=score,
+                            step=epoch
+                        )
                 
-                self.optimizer.zero_grad()
 
-                _x = self.model(time, x)
-                t_emb, _x = self.model(time, x)
-                x = torch.cat([t_emb, x], dim=1)
-                
-                loss = self.criterion(x, _x)
-                loss.backward()
-                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step(score)
 
-                train_loss.append(loss.item())
-
-            if epoch % 10 == 0 :
-                score = self.validation(self.model, 0.95)
-                diff = self.cos(x, _x).cpu().tolist()
-
-                logger.info(
-                    f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})'
-                )
-                print(f'Epoch : [{epoch}] train_loss:{np.mean(train_loss)}, train_cos:{np.mean(diff)} val_cos:{score})')
-
-            if self.scheduler is not None:
-                self.scheduler.step(score)
-
-            if best_score < score:
-                best_score = score
-                #torch.save(model.module.state_dict(), './best_model.pth', _use_new_zipfile_serialization=False)
-                torch.save(self.model.module.state_dict(), os.path.join(self.args.model_dir, "./best_model.pth"), _use_new_zipfile_serialization=False)
-                #torch.save(self.model.state_dict(), os.path.join(self.args.model_dir, "./best_model.pth"), _use_new_zipfile_serialization=False)
-                
+                if best_score < score:
+                    best_score = score
+                    #torch.save(model.module.state_dict(), './best_model.pth', _use_new_zipfile_serialization=False)
+                    torch.save(self.model.module.state_dict(), os.path.join(self.args.model_dir, "./best_model.pth"), _use_new_zipfile_serialization=False)
+                    #torch.save(self.model.state_dict(), os.path.join(self.args.model_dir, "./best_model.pth"), _use_new_zipfile_serialization=False)
+                    
+        #################EXP#END###################################
+        
         return self.model
     
     def validation(self, eval_model, thr):
@@ -149,29 +210,54 @@ def get_and_define_dataset(args):
     return train_ds, test_ds
 
 def get_dataloader(args, train_ds, test_ds):
+    
+    
+    #################SMDDP#START#################################
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_ds,
+        num_replicas=args.world_size,
+        rank=rank
+    )
+    
+    test_sampler = torch.utils.data.distributed.DistributedSampler(
+        test_ds,
+        num_replicas=args.world_size,
+        rank=rank
+    )
 
     train_loader = torch.utils.data.DataLoader(
-        dataset=train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
+        dataset = train_ds,
+        batch_size = args.batch_size,
+        shuffle = False,
         pin_memory=True,
         num_workers=args.workers,
-        prefetch_factor=3
+        prefetch_factor=3,
+        sampler=train_sampler
     )
 
     val_loader = torch.utils.data.DataLoader(
-        dataset=test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
+        dataset = test_ds,
+        batch_size = args.batch_size,
+        shuffle = False,
         pin_memory=True,
         num_workers=args.workers,
-        prefetch_factor=3
+        prefetch_factor=3,
+        sampler=test_sampler
     )
-
+    
+    #################SMDDP#END###################################
+    
     return train_loader, val_loader
 
 def train(args):
-
+    
+    # if args.distributed:
+    #     # Initialize the distributed environment.
+    #     world_size = len(args.hosts)
+    #     os.environ['WORLD_SIZE'] = str(world_size)
+    #     host_rank = args.hosts.index(args.current_host)
+    #     dist.init_process_group(backend=args.backend, rank=host_rank)
+    
     logger.info("Check gpu..")
     device = check_gpu()
     logger.info("Device Type: {}".format(device))
@@ -183,15 +269,20 @@ def train(args):
     train_loader, val_loader = get_dataloader(args, train_ds, test_ds)
     
     logger.info("Set components..")
+    
+    device = torch.device(f"cuda:{args.local_rank}")
+    #model = Net().to(device)
 
-    model = nn.DataParallel(
-        get_model(
-            input_dim=args.num_features*args.shingle_size + args.emb_size,
-            hidden_sizes=[64, 48],
-            btl_size=32,
-            emb_size=args.emb_size
-        )
+    model = get_model(
+        input_dim=args.num_features*args.shingle_size + args.emb_size,
+        hidden_sizes=[64, 48],
+        btl_size=32,
+        emb_size=args.emb_size
     ).to(device)
+    
+    #################SMDDP#START#################################
+    model = DDP(model, device_ids=[local_rank])
+    #################SMDDP#END###################################
 
     optimizer = torch.optim.Adam(
         params=model.parameters(),
@@ -207,7 +298,7 @@ def train(args):
         min_lr=1e-8,
         verbose=True
     )
-
+    
     logger.info("Define trainer..")
     trainer = Trainer(
         args=args,
@@ -219,7 +310,7 @@ def train(args):
         device=device,
         epoch=args.epochs
     )
-
+    
     logger.info("Start training..")
     model = trainer.fit()
 
@@ -243,6 +334,14 @@ if __name__ == "__main__":
     parser.add_argument("--shingle_size", type=int, default=os.environ["SM_HP_SHINGLE_SIZE"])
     parser.add_argument("--num_features", type=int, default=os.environ["SM_HP_NUM_FEATURES"])
     parser.add_argument("--emb_size", type=int, default=os.environ["SM_HP_EMB_SIZE"])
-        
     
-    train(parser.parse_args())
+    #################SMDDP#START#################################
+    dist.init_process_group(backend=backend)
+    args = parser.parse_args()
+    args.world_size = dist.get_world_size()
+    args.rank = rank = dist.get_rank()
+    args.local_rank = local_rank = int(os.getenv("LOCAL_RANK", -1))
+    #################SMDDP#END###################################
+    print ("args.local_rank", args.local_rank)
+
+    train(args)
