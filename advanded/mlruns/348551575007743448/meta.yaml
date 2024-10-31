@@ -1,0 +1,6 @@
+artifact_location: file:///home/ec2-user/SageMaker/sagemaker-immersion-day/advanded/mlruns/348551575007743448
+creation_time: 1730344521411
+experiment_id: '348551575007743448'
+last_update_time: 1730344521411
+lifecycle_stage: active
+name: run-ad-ts-exp-1031-03151730344521
